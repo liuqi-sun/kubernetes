@@ -280,6 +280,8 @@ func (p *PriorityQueue) Run() {
 
 // Add adds a pod to the active queue. It should be called only when a new pod
 // is added so there is no chance the pod is already in active/unschedulable/backoff queues
+// 添加podInfo到activeQ，删除unschedulableQ和podBackoffQ中已经存在的pod。
+// 条件变量上发送广播信号。
 func (p *PriorityQueue) Add(pod *v1.Pod) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
@@ -304,6 +306,7 @@ func (p *PriorityQueue) Add(pod *v1.Pod) error {
 }
 
 // Activate moves the given pods to activeQ iff they're in unschedulableQ or backoffQ.
+// 如果pod在unschedulableQ和backoffQ存在，移动到activeQ中，并删除unschedulableQ和backoffQ中的pod。
 func (p *PriorityQueue) Activate(pods map[string]*v1.Pod) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
@@ -421,6 +424,7 @@ func (p *PriorityQueue) flushBackoffQCompleted() {
 		if boTime.After(p.clock.Now()) {
 			return
 		}
+		// pod的backoff已过，超时，移动pod到activeQ
 		_, err := p.podBackoffQ.Pop()
 		if err != nil {
 			klog.ErrorS(err, "Unable to pop pod from backoff queue despite backoff completion", "pod", klog.KObj(pod))
@@ -442,12 +446,14 @@ func (p *PriorityQueue) flushUnschedulableQLeftover() {
 	currentTime := p.clock.Now()
 	for _, pInfo := range p.unschedulableQ.podInfoMap {
 		lastScheduleTime := pInfo.Timestamp
+		//在unschedulableQ中已经待了1分钟了，需要move了
 		if currentTime.Sub(lastScheduleTime) > unschedulableQTimeInterval {
 			podsToMove = append(podsToMove, pInfo)
 		}
 	}
 
 	if len(podsToMove) > 0 {
+		// 根据pod是否仍处在backoff期间，决定pod被移动到backoffQ中还是activeQ中。
 		p.movePodsToActiveOrBackoffQueue(podsToMove, UnschedulableTimeout)
 	}
 }
@@ -472,7 +478,9 @@ func (p *PriorityQueue) Pop() (*framework.QueuedPodInfo, error) {
 		return nil, err
 	}
 	pInfo := obj.(*framework.QueuedPodInfo)
+	// 调度次数加1
 	pInfo.Attempts++
+	// 调度循环加1
 	p.schedulingCycle++
 	return pInfo, err
 }
@@ -496,6 +504,8 @@ func isPodUpdated(oldPod, newPod *v1.Pod) bool {
 // the item from the unschedulable queue if pod is updated in a way that it may
 // become schedulable and adds the updated one to the active queue.
 // If pod is not present in any of the queues, it is added to the active queue.
+// 如果pod在unschedulableQ中需要注意，如果有变化，可能导致可调度，所以需要从unschedulableQ移动到
+// activeQ或者backoffQ中。
 func (p *PriorityQueue) Update(oldPod, newPod *v1.Pod) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
@@ -567,6 +577,7 @@ func (p *PriorityQueue) Delete(pod *v1.Pod) error {
 
 // AssignedPodAdded is called when a bound pod is added. Creation of this pod
 // may make pending pods with matching affinity terms schedulable.
+// 绑定pod被添加，移动与绑定pod有亲和性关系的pending pod，会触发移动请求
 func (p *PriorityQueue) AssignedPodAdded(pod *v1.Pod) {
 	p.lock.Lock()
 	p.movePodsToActiveOrBackoffQueue(p.getUnschedulablePodsWithMatchingAffinityTerm(pod), AssignedPodAdd)
@@ -610,6 +621,8 @@ func (p *PriorityQueue) movePodsToActiveOrBackoffQueue(podInfoList []*framework.
 		}
 		moved = true
 		pod := pInfo.Pod
+		// 虽然pod在unschedulableQ中已经待了1分钟了，需要move了,
+		// 但是由于调度失败次数太多，pod仍处在backoff期间，所以pod被加入backoffQ中。
 		if p.isPodBackingoff(pInfo) {
 			if err := p.podBackoffQ.Add(pInfo); err != nil {
 				klog.ErrorS(err, "Error adding pod to the backoff queue", "pod", klog.KObj(pod))
@@ -746,6 +759,7 @@ func (p *PriorityQueue) calculateBackoffDuration(podInfo *framework.QueuedPodInf
 		if duration > p.podMaxBackoffDuration-duration {
 			return p.podMaxBackoffDuration
 		}
+		// 持续时间增加上一次的持续时间，直到持续时间大于p.podMaxBackoffDuration-duration返回podMaxBackoffDuration
 		duration += duration
 	}
 	return duration

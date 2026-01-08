@@ -65,9 +65,11 @@ type schedulerCache struct {
 	assumedPods sets.String
 	// a map from pod key to podState.
 	podStates map[string]*podState
-	nodes     map[string]*nodeInfoListItem
+	// 刘琪from node name to nodeInfoListItem
+	nodes map[string]*nodeInfoListItem
 	// headNode points to the most recently updated NodeInfo in "nodes". It is the
 	// head of the linked list.
+	// 应该类似于LRU缓冲,nodes实现索引查询
 	headNode *nodeInfoListItem
 	nodeTree *nodeTree
 	// A map from image name to its imageState.
@@ -207,6 +209,7 @@ func (cache *schedulerCache) UpdateSnapshot(nodeSnapshot *Snapshot) error {
 	// HavePodsWithAffinityNodeInfoList must be re-created if a node changed its
 	// status from having pods with affinity to NOT having pods with affinity or the other
 	// way around.
+	// node状态改变，由没有affinity pod到有affinity pod，反之亦然，都置true
 	updateNodesHavePodsWithAffinity := false
 	// HavePodsWithRequiredAntiAffinityNodeInfoList must be re-created if a node changed its
 	// status from having pods with required anti-affinity to NOT having pods with required
@@ -215,6 +218,7 @@ func (cache *schedulerCache) UpdateSnapshot(nodeSnapshot *Snapshot) error {
 
 	// Start from the head of the NodeInfo doubly linked list and update snapshot
 	// of NodeInfos updated after the last snapshot.
+	// 遍历LRU cache，构建快照nodeInfo map
 	for node := cache.headNode; node != nil; node = node.next {
 		if node.info.Generation <= snapshotGeneration {
 			// all the nodes are updated before the existing snapshot. We are done.
@@ -244,6 +248,7 @@ func (cache *schedulerCache) UpdateSnapshot(nodeSnapshot *Snapshot) error {
 	}
 	// Update the snapshot generation with the latest NodeInfo generation.
 	if cache.headNode != nil {
+		//LRU head节点generation最大
 		nodeSnapshot.generation = cache.headNode.info.Generation
 	}
 
@@ -311,6 +316,7 @@ func (cache *schedulerCache) updateNodeInfoSnapshotList(snapshot *Snapshot, upda
 }
 
 // If certain nodes were deleted after the last snapshot was taken, we should remove them from the snapshot.
+// 最后获取快照后，LRU cache有变化，需要更新快照
 func (cache *schedulerCache) removeDeletedNodesFromSnapshot(snapshot *Snapshot) {
 	toDelete := len(snapshot.nodeInfoMap) - cache.nodeTree.numNodes
 	for name := range snapshot.nodeInfoMap {
@@ -347,6 +353,7 @@ func (cache *schedulerCache) PodCount() (int, error) {
 	return count, nil
 }
 
+// 应该在调度器select host后会调用
 func (cache *schedulerCache) AssumePod(pod *v1.Pod) error {
 	key, err := framework.GetPodKey(pod)
 	if err != nil {
@@ -387,6 +394,7 @@ func (cache *schedulerCache) finishBinding(pod *v1.Pod, now time.Time) error {
 	if ok && cache.assumedPods.Has(key) {
 		dl := now.Add(cache.ttl)
 		currState.bindingFinished = true
+		// 设置超时时间，超时后清除pod
 		currState.deadline = &dl
 	}
 	return nil
@@ -409,6 +417,7 @@ func (cache *schedulerCache) ForgetPod(pod *v1.Pod) error {
 	switch {
 	// Only assumed pod can be forgotten.
 	case ok && cache.assumedPods.Has(key):
+		// 在LRU cache中删除pod
 		err := cache.removePod(pod)
 		if err != nil {
 			return err
@@ -422,6 +431,7 @@ func (cache *schedulerCache) ForgetPod(pod *v1.Pod) error {
 }
 
 // Assumes that lock is already acquired.
+// 把pod添加到NodeInfo，NodeInfo添加到LRU cache中
 func (cache *schedulerCache) addPod(pod *v1.Pod) {
 	n, ok := cache.nodes[pod.Spec.NodeName]
 	if !ok {
@@ -445,6 +455,8 @@ func (cache *schedulerCache) updatePod(oldPod, newPod *v1.Pod) error {
 // Removes a pod from the cached node info. If the node information was already
 // removed and there are no more pods left in the node, cleans up the node from
 // the cache.
+// 从nodeInfo中移除pod，
+// node中pod为0时，从LRU缓冲中删除nodeInfo
 func (cache *schedulerCache) removePod(pod *v1.Pod) error {
 	n, ok := cache.nodes[pod.Spec.NodeName]
 	if !ok {
@@ -454,6 +466,7 @@ func (cache *schedulerCache) removePod(pod *v1.Pod) error {
 	if err := n.info.RemovePod(pod); err != nil {
 		return err
 	}
+	// node中pod为0时，从LRU缓冲中删除nodeInfo
 	if len(n.info.Pods) == 0 && n.info.Node() == nil {
 		cache.removeNodeInfoFromList(pod.Spec.NodeName)
 	} else {
@@ -462,6 +475,7 @@ func (cache *schedulerCache) removePod(pod *v1.Pod) error {
 	return nil
 }
 
+// 把pod添加到NodeInfo，NodeInfo添加到LRU cache中
 func (cache *schedulerCache) AddPod(pod *v1.Pod) error {
 	key, err := framework.GetPodKey(pod)
 	if err != nil {
@@ -528,6 +542,7 @@ func (cache *schedulerCache) UpdatePod(oldPod, newPod *v1.Pod) error {
 	return nil
 }
 
+// 从LRU cache中删除pod，以及从假定pod缓冲和pod状态缓冲中删除pod
 func (cache *schedulerCache) RemovePod(pod *v1.Pod) error {
 	key, err := framework.GetPodKey(pod)
 	if err != nil {
@@ -586,6 +601,8 @@ func (cache *schedulerCache) GetPod(pod *v1.Pod) (*v1.Pod, error) {
 	return podState.pod, nil
 }
 
+// 添加node到LRU cache中。
+// 可以通过添加pod或者node两种方式把nodeInfo添加到LRU cache中。
 func (cache *schedulerCache) AddNode(node *v1.Node) *framework.NodeInfo {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -594,7 +611,7 @@ func (cache *schedulerCache) AddNode(node *v1.Node) *framework.NodeInfo {
 	if !ok {
 		n = newNodeInfoListItem(framework.NewNodeInfo())
 		cache.nodes[node.Name] = n
-	} else {
+	} else { // 可能已经通过pod方式添加了nodeInfo
 		cache.removeNodeImageStates(n.info.Node())
 	}
 	cache.moveNodeInfoToHead(node.Name)
@@ -631,6 +648,7 @@ func (cache *schedulerCache) UpdateNode(oldNode, newNode *v1.Node) *framework.No
 // the source of truth.
 // However, we keep a ghost node with the list of pods until all pod deletion
 // events have arrived. A ghost node is skipped from snapshots.
+// 从LRU cache中删除nodeInfo，从nodeTree中删除node
 func (cache *schedulerCache) RemoveNode(node *v1.Node) error {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -707,6 +725,7 @@ func (cache *schedulerCache) removeNodeImageStates(node *v1.Node) {
 	}
 }
 
+// 定期(1s)清除已经绑定的假定pod，pod绑定后会设置一个超时时间
 func (cache *schedulerCache) run() {
 	go wait.Until(cache.cleanupExpiredAssumedPods, cache.period, cache.stop)
 }
@@ -743,6 +762,7 @@ func (cache *schedulerCache) cleanupAssumedPods(now time.Time) {
 	}
 }
 
+// 从LRU cache中删除pod，以及从假定pod缓冲和pod状态缓冲中删除pod
 func (cache *schedulerCache) expirePod(key string, ps *podState) error {
 	if err := cache.removePod(ps.pod); err != nil {
 		return err

@@ -30,8 +30,11 @@ import (
 // NodeTree is NOT thread-safe, any concurrent updates/reads from it must be synchronized by the caller.
 // It is used only by schedulerCache, and should stay as such.
 type nodeTree struct {
-	tree     map[string][]string // a map from zone (region-zone) to an array of nodes in the zone.
-	zones    []string            // a list of all the zones in the tree (keys)
+	// zone关联的node name
+	tree map[string][]string // a map from zone (region-zone) to an array of nodes in the zone.
+	// tree中所有的zone
+	zones []string // a list of all the zones in the tree (keys)
+	// node数量
 	numNodes int
 }
 

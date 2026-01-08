@@ -22,7 +22,7 @@ import (
 	"math"
 	"sync/atomic"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
@@ -199,6 +199,7 @@ func (pl *InterPodAffinity) PreScore(
 
 		topoScore := make(scoreMap)
 		for _, existingPod := range podsToProcess {
+			// 比较复杂，不好理解，没细看
 			pl.processExistingPod(state, existingPod, nodeInfo, pod, topoScore)
 		}
 		if len(topoScore) > 0 {

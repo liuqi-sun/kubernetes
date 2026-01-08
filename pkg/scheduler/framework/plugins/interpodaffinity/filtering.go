@@ -118,6 +118,7 @@ func (m topologyToMatchedTermCount) update(node *v1.Node, tk string, value int64
 // for each affinity term if "targetPod" matches ALL terms.
 func (m topologyToMatchedTermCount) updateWithAffinityTerms(
 	terms []framework.AffinityTerm, pod *v1.Pod, node *v1.Node, value int64, enableNamespaceSelector bool) {
+	// 虽然pod与规则匹配，但是拓扑域可能不一样。在filter会使用node的拓扑域查找，可能查不到匹配值。
 	if podMatchesAllAffinityTerms(terms, pod, enableNamespaceSelector) {
 		for _, t := range terms {
 			m.update(node, t.TopologyKey, value)
@@ -164,6 +165,9 @@ func (pl *InterPodAffinity) getExistingAntiAffinityCounts(pod *v1.Pod, nsLabels 
 			klog.ErrorS(nil, "Node not found")
 			return
 		}
+		// 统计一个节点内的所有已存在pod的反亲和性规则匹配目标pod的数量，拓扑pair为key，value为匹配的规则数量
+		// 匹配时，并不匹配拓扑域，也就是统计所有pair，包括和目标pod不在同一拓扑域的也统计，只要label匹配即可，例如当前节点中的pod的反亲和规则与目标pod匹配，但是pair不一样。
+		// 在filter阶段，会通过node的拓扑域查找此pair是否有匹配的数量。
 		topoMap := make(topologyToMatchedTermCount)
 		for _, existingPod := range nodeInfo.PodsWithRequiredAntiAffinity {
 			topoMap.updateWithAntiAffinityTerms(existingPod.RequiredAntiAffinityTerms, pod, nsLabels, node, 1, enableNamespaceSelector)
@@ -175,10 +179,12 @@ func (pl *InterPodAffinity) getExistingAntiAffinityCounts(pod *v1.Pod, nsLabels 
 	pl.parallelizer.Until(context.Background(), len(nodes), processNode)
 
 	result := make(topologyToMatchedTermCount)
+	// 聚合所有节点的结果，index为节点总数
 	for i := 0; i <= int(index); i++ {
 		result.append(topoMaps[i])
 	}
 
+	//每一个pair对应的匹配数量
 	return result
 }
 
@@ -325,7 +331,7 @@ func satisfyExistingPodsAntiAffinity(state *preFilterState, nodeInfo *framework.
 	return true
 }
 
-//  Checks if the node satisfies the incoming pod's anti-affinity rules.
+// Checks if the node satisfies the incoming pod's anti-affinity rules.
 func satisfyPodAntiAffinity(state *preFilterState, nodeInfo *framework.NodeInfo) bool {
 	if len(state.antiAffinityCounts) > 0 {
 		for _, term := range state.podInfo.RequiredAntiAffinityTerms {

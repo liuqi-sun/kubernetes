@@ -38,10 +38,12 @@ type preScoreState struct {
 	// IgnoredNodes is a set of node names which miss some Constraints[*].topologyKey.
 	IgnoredNodes sets.String
 	// TopologyPairToPodCounts is keyed with topologyPair, and valued with the number of matching pods.
+	// pair中与目标(被调度)pod匹配的已存在pod
 	TopologyPairToPodCounts map[topologyPair]*int64
 	// TopologyNormalizingWeight is the weight we give to the counts per topology.
 	// This allows the pod counts of smaller topologies to not be watered down by
 	// bigger ones.
+	//拓扑pair(key，value)数量权重
 	TopologyNormalizingWeight []float64
 }
 
@@ -72,8 +74,10 @@ func (pl *PodTopologySpread) initPreScoreState(s *preScoreState, pod *v1.Pod, fi
 	if len(s.Constraints) == 0 {
 		return nil
 	}
+	// 拓扑pair(key，value)数量，在所有filter 节点中统计出现的总数，也就是pair包含的节点数。
 	topoSize := make([]int, len(s.Constraints))
 	for _, node := range filteredNodes {
+		//过滤掉不满足pod 拓扑key的node
 		if requireAllTopologies && !nodeLabelsMatchSpreadConstraints(node.Labels, s.Constraints) {
 			// Nodes which don't have all required topologyKeys present are ignored
 			// when scoring later.
@@ -99,6 +103,7 @@ func (pl *PodTopologySpread) initPreScoreState(s *preScoreState, pod *v1.Pod, fi
 		if c.TopologyKey == v1.LabelHostname {
 			sz = len(filteredNodes) - len(s.IgnoredNodes)
 		}
+		// 拓扑pair(key，value)权重
 		s.TopologyNormalizingWeight[i] = topologyNormalizingWeight(sz)
 	}
 	return nil
@@ -151,23 +156,28 @@ func (pl *PodTopologySpread) PreScore(
 		// (1) `node` should satisfy incoming pod's NodeSelector/NodeAffinity
 		// (2) All topologyKeys need to be present in `node`
 		match, _ := requiredNodeAffinity.Match(node)
+		//过滤掉不满足node亲和性和不满足pod 拓扑key的node
 		if !match || (requireAllTopologies && !nodeLabelsMatchSpreadConstraints(node.Labels, state.Constraints)) {
 			return
 		}
 
+		// state.Constraints 被调度(目标)pod的拓扑约束规则
 		for _, c := range state.Constraints {
 			pair := topologyPair{key: c.TopologyKey, value: node.Labels[c.TopologyKey]}
 			// If current topology pair is not associated with any candidate node,
 			// continue to avoid unnecessary calculation.
 			// Per-node counts are also skipped, as they are done during Score.
+			// 统计相同pair下，已存在pod与目标pod匹配的数量
 			tpCount := state.TopologyPairToPodCounts[pair]
 			if tpCount == nil {
 				continue
 			}
+			// node中已存在pod与目标pod进行匹配，并统计匹配成功数量
 			count := countPodsMatchSelector(nodeInfo.Pods, c.Selector, pod.Namespace)
 			atomic.AddInt64(tpCount, int64(count))
 		}
 	}
+	//计算所有node中已存在pod匹配被调度pod的数量，以属于同一拓扑域进行分类统计
 	pl.parallelizer.Until(ctx, len(allNodes), processAllNode)
 
 	cycleState.Write(preScoreStateKey, state)

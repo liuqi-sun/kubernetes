@@ -94,6 +94,7 @@ func (ce ClusterEvent) IsWildCard() bool {
 type QueuedPodInfo struct {
 	*PodInfo
 	// The time pod added to the scheduling queue.
+	// 添加到activQ中时的时间
 	Timestamp time.Time
 	// Number of schedule attempts before successfully scheduled.
 	// It's used to record the # attempts metric.

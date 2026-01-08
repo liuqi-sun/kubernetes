@@ -69,6 +69,8 @@ func (sched *Scheduler) addNodeToCache(obj interface{}) {
 
 	nodeInfo := sched.SchedulerCache.AddNode(node)
 	klog.V(3).InfoS("Add event for node", "node", klog.KObj(node))
+	// 会触发移动请求。
+	// unschedulableQ中的所有pod会移动到backoffQ或者activeQ中，取决于backoff time是否超时，backoff 时间与调度失败次数有关系。
 	sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(queue.NodeAdd, preCheckForNode(nodeInfo))
 }
 
@@ -113,6 +115,8 @@ func (sched *Scheduler) deleteNodeFromCache(obj interface{}) {
 	}
 }
 
+// 添加podInfo到activeQ，删除unschedulableQ和podBackoffQ中已经存在的pod。
+// 条件变量上发送广播信号。
 func (sched *Scheduler) addPodToSchedulingQueue(obj interface{}) {
 	pod := obj.(*v1.Pod)
 	klog.V(3).InfoS("Add event for unscheduled pod", "pod", klog.KObj(pod))
@@ -133,10 +137,13 @@ func (sched *Scheduler) updatePodInSchedulingQueue(oldObj, newObj interface{}) {
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("failed to check whether pod %s/%s is assumed: %v", newPod.Namespace, newPod.Name, err))
 	}
+	// 如果pod是假定pod，意味着已经完成调度周期，已经选择了host。此时就不进行更新了。
 	if isAssumed {
 		return
 	}
 
+	// 如果pod在unschedulableQ中需要注意，如果有变化，可能导致可调度，所以需要从unschedulableQ移动到
+	// activeQ或者backoffQ中。
 	if err := sched.SchedulingQueue.Update(oldPod, newPod); err != nil {
 		utilruntime.HandleError(fmt.Errorf("unable to update %T: %v", newObj, err))
 	}
@@ -185,10 +192,13 @@ func (sched *Scheduler) addPodToCache(obj interface{}) {
 	}
 	klog.V(3).InfoS("Add event for scheduled pod", "pod", klog.KObj(pod))
 
+	// 把pod添加到NodeInfo，NodeInfo添加到LRU cache中
 	if err := sched.SchedulerCache.AddPod(pod); err != nil {
 		klog.ErrorS(err, "Scheduler cache AddPod failed", "pod", klog.KObj(pod))
 	}
 
+	// 绑定pod被添加，移动与绑定pod有亲和性关系的pending pod(unschedulableQ队列中的pod)，会触发移动请求.
+	// unschedulableQ中的pod会移动到backoffQ或者activeQ中，取决于backoff time是否超时，backoff 时间与调度失败次数有关系。
 	sched.SchedulingQueue.AssignedPodAdded(pod)
 }
 
@@ -237,10 +247,13 @@ func (sched *Scheduler) deletePodFromCache(obj interface{}) {
 		return
 	}
 	klog.V(3).InfoS("Delete event for scheduled pod", "pod", klog.KObj(pod))
+	// 从LRU cache中删除pod，以及从假定pod缓冲和pod状态缓冲中删除pod
 	if err := sched.SchedulerCache.RemovePod(pod); err != nil {
 		klog.ErrorS(err, "Scheduler cache RemovePod failed", "pod", klog.KObj(pod))
 	}
 
+	// 会触发移动请求。
+	// unschedulableQ中的所有pod会移动到backoffQ或者activeQ中，取决于backoff time是否超时，backoff 时间与调度失败次数有关系。
 	sched.SchedulingQueue.MoveAllToActiveOrBackoffQueue(queue.AssignedPodDelete, nil)
 }
 
