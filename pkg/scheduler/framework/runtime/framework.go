@@ -290,6 +290,7 @@ func NewFramework(r Registry, profile *config.KubeSchedulerProfile, opts ...Opti
 	}
 
 	// get needed plugins from config
+	//pg为配置文件中配置的插件
 	pg := f.pluginsNeeded(profile.Plugins)
 
 	pluginConfig := make(map[string]runtime.Object, len(profile.PluginConfig))
@@ -307,6 +308,7 @@ func NewFramework(r Registry, profile *config.KubeSchedulerProfile, opts ...Opti
 	}
 
 	pluginsMap := make(map[string]framework.Plugin)
+	//r为程序实现的插件，启动时初始化。
 	for name, factory := range r {
 		// initialize only needed plugins.
 		if _, ok := pg[name]; !ok {
@@ -332,6 +334,8 @@ func NewFramework(r Registry, profile *config.KubeSchedulerProfile, opts ...Opti
 
 	// initialize plugins per individual extension points
 	for _, e := range f.getExtensionPoints(profile.Plugins) {
+		//更新frameworkImpl中的插件，依赖于程序启动时注册的r，和用户配置文件指定的pg。
+		//实现扩展点与插件绑定
 		if err := updatePluginList(e.slicePtr, *e.plugins, pluginsMap); err != nil {
 			return nil, err
 		}
